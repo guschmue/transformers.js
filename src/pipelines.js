@@ -3017,6 +3017,7 @@ export async function pipeline(
         cache_dir = null,
         local_files_only = false,
         revision = 'main',
+        session_options = {},
     } = {}
 ) {
     // Helper method to construct pipeline
@@ -3044,6 +3045,7 @@ export async function pipeline(
         cache_dir,
         local_files_only,
         revision,
+        session_options,
     }
 
     const classes = new Map([

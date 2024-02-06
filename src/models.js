@@ -123,23 +123,24 @@ async function constructSession(pretrained_model_name_or_path, fileName, options
     let buffer = await getModelFile(pretrained_model_name_or_path, modelFileName, true, options);
 
     try {
-        return await InferenceSession.create(buffer, {
-            executionProviders,
-        });
-    } catch (err) {
-        // If the execution provided was only wasm, throw the error
-        if (executionProviders.length === 1 && executionProviders[0] === 'wasm') {
-            throw err;
+        let opt = options.session_options;
+        // use default execution providers if not specified
+        if (opt.executionProviders === undefined) {
+            opt.executionProviders = executionProviders;
         }
-
-        console.warn(err);
-        console.warn(
-            'Something went wrong during model construction (most likely a missing operation). ' +
-            'Using `wasm` as a fallback. '
-        )
-        return await InferenceSession.create(buffer, {
-            executionProviders: ['wasm']
-        });
+        // handle external data
+        if (opt.externalData !== undefined) {
+            for (let i = 0; i < opt.externalData.length; i++) {
+                const ext = opt.externalData[i];
+                if (typeof ext.data === "string") {
+                    let ext_buffer = await getModelFile(pretrained_model_name_or_path, ext.data, true, options);
+                    ext.data = ext_buffer;
+                }
+            }
+        }
+        return await InferenceSession.create(buffer, opt);
+    } catch (err) {
+        throw err;
     }
 }
 
@@ -189,6 +190,13 @@ function validateInputs(session, inputs) {
     return checkedInputs;
 }
 
+function dumpInputs(inputs) {
+    for (const [name, t] of Object.entries(inputs)) {
+        console.log(`${name} [${t.dims}], ${t.type}, ${t.location}, ${t.size}`);
+    }
+    console.log('--');
+}
+
 /**
  * Executes an InferenceSession using the specified inputs.
  * NOTE: `inputs` must contain at least the input names of the model.
@@ -204,7 +212,19 @@ async function sessionRun(session, inputs) {
     const checkedInputs = validateInputs(session, inputs);
     try {
         // @ts-ignore
+        // dumpInputs(checkedInputs);
+        /*
+        let feed = {};
+        for (const [name, t] of Object.entries(checkedInputs)) {
+            feed[name] = t.t;
+        }
+        */
         let output = await session.run(checkedInputs);
+        for (const [name, t] of Object.entries(checkedInputs)) {
+            if (t.location === 'gpu-buffer' && name.startsWith('past')) {
+                t.dispose();
+            };
+        }
         output = replaceTensors(output);
         return output;
     } catch (e) {
@@ -741,6 +761,7 @@ export class PreTrainedModel extends Callable {
         local_files_only = false,
         revision = 'main',
         model_file_name = null,
+        session_options = {},     
     } = {}) {
 
         let options = {
@@ -751,6 +772,7 @@ export class PreTrainedModel extends Callable {
             local_files_only,
             revision,
             model_file_name,
+            session_options,     
         }
 
         const modelName = MODEL_CLASS_TO_NAME_MAPPING.get(this);
@@ -788,7 +810,7 @@ export class PreTrainedModel extends Callable {
 
         } else { // should be MODEL_TYPES.EncoderOnly
             if (modelType !== MODEL_TYPES.EncoderOnly) {
-                console.warn(`Model type for '${modelName ?? config?.model_type}' not found, assuming encoder-only architecture. Please report this at https://github.com/xenova/transformers.js/issues/new/choose.`)
+                console.warn(`Model type for '${modelName}' not found, assuming encoder-only architecture. Please report this at https://github.com/xenova/transformers.js/issues/new/choose.`)
             }
             info = await Promise.all([
                 AutoConfig.from_pretrained(pretrained_model_name_or_path, options),
@@ -1296,6 +1318,8 @@ export class PreTrainedModel extends Callable {
         } else {
             // TODO support batches (i.e., batch_size > 1)
             const batch_size = 1;
+            const dtype = this.config.precision || 'float32';
+            const empty = (dtype === 'float16') ? new Uint16Array() : [];
 
             // @ts-ignore
             if (this.config.is_encoder_decoder && (this.add_encoder_pkv ?? true)) {
@@ -1305,10 +1329,10 @@ export class PreTrainedModel extends Callable {
                 let decoder_dims = [batch_size, this.num_decoder_heads, 0, this.decoder_dim_kv];
                 // @ts-ignore
                 for (let i = 0; i < this.num_decoder_layers; ++i) {
-                    decoderFeeds[`past_key_values.${i}.encoder.key`] = new Tensor('float32', [], encoder_dims)
-                    decoderFeeds[`past_key_values.${i}.encoder.value`] = new Tensor('float32', [], encoder_dims)
-                    decoderFeeds[`past_key_values.${i}.decoder.key`] = new Tensor('float32', [], decoder_dims)
-                    decoderFeeds[`past_key_values.${i}.decoder.value`] = new Tensor('float32', [], decoder_dims)
+                    decoderFeeds[`past_key_values.${i}.encoder.key`] = new Tensor(dtype, empty, encoder_dims)
+                    decoderFeeds[`past_key_values.${i}.encoder.value`] = new Tensor(dtype, empty, encoder_dims)
+                    decoderFeeds[`past_key_values.${i}.decoder.key`] = new Tensor(dtype, empty, decoder_dims)
+                    decoderFeeds[`past_key_values.${i}.decoder.value`] = new Tensor(dtype, empty, decoder_dims)
                 }
             } else if (this.config.model_type === 'falcon') {
                 // NOTE: Custom implementation for Falcon
@@ -1316,15 +1340,15 @@ export class PreTrainedModel extends Callable {
                 let dims = [batch_size * this.num_heads, 0, this.dim_kv]
                 // @ts-ignore
                 for (let i = 0; i < this.num_layers; ++i) {
-                    decoderFeeds[`past_key_values.${i}.key`] = new Tensor('float32', [], dims)
-                    decoderFeeds[`past_key_values.${i}.value`] = new Tensor('float32', [], dims)
+                    decoderFeeds[`past_key_values.${i}.key`] = new Tensor(dtype, empty, dims)
+                    decoderFeeds[`past_key_values.${i}.value`] = new Tensor(dtype, empty, dims)
                 }
             } else if (this.config.multi_query) { // e.g., for `gpt_bigcode`
                 // @ts-ignore
                 let dims = [batch_size * this.num_heads, 0, 2 * this.dim_kv]
                 // @ts-ignore
                 for (let i = 0; i < this.num_layers; ++i) {
-                    decoderFeeds[`past_key_values.${i}.key_value`] = new Tensor('float32', [], dims)
+                    decoderFeeds[`past_key_values.${i}.key_value`] = new Tensor(dtype, empty, dims)
                 }
             } else if (this.config.model_type === 'bloom') {
                 // NOTE: Custom implementation for Bloom
@@ -1335,16 +1359,16 @@ export class PreTrainedModel extends Callable {
                 let valueDims = [batch_size * this.num_heads, 0, this.dim_kv] // [batch_size x num_heads,past_sequence_length,64]
                 // @ts-ignore
                 for (let i = 0; i < this.num_layers; ++i) {
-                    decoderFeeds[`past_key_values.${i}.key`] = new Tensor('float32', [], keyDims)
-                    decoderFeeds[`past_key_values.${i}.value`] = new Tensor('float32', [], valueDims)
+                    decoderFeeds[`past_key_values.${i}.key`] = new Tensor(dtype, empty, keyDims)
+                    decoderFeeds[`past_key_values.${i}.value`] = new Tensor(dtype, empty, valueDims)
                 }
             } else { // Decoder-only
                 // @ts-ignore
                 let dims = [batch_size, this.num_heads, 0, this.dim_kv]
                 // @ts-ignore
                 for (let i = 0; i < this.num_layers; ++i) {
-                    decoderFeeds[`past_key_values.${i}.key`] = new Tensor('float32', [], dims)
-                    decoderFeeds[`past_key_values.${i}.value`] = new Tensor('float32', [], dims)
+                    decoderFeeds[`past_key_values.${i}.key`] = new Tensor(dtype, empty, dims)
+                    decoderFeeds[`past_key_values.${i}.value`] = new Tensor(dtype, empty, dims)
                 }
             }
         }
@@ -3557,40 +3581,6 @@ export class LlamaForCausalLM extends LlamaPreTrainedModel { }
 //////////////////////////////////////////////////
 
 //////////////////////////////////////////////////
-// Qwen2 models
-
-/**
- * The bare Qwen2 Model outputting raw hidden-states without any specific head on top.
- */
-export class Qwen2PreTrainedModel extends PreTrainedModel {
-    /**
-     * Creates a new instance of the `Qwen2PreTrainedModel` class.
-     * @param {Object} config The model configuration object.
-     * @param {Object} session The ONNX session object.
-     * @param {GenerationConfig} generation_config The generation configuration.
-     */
-    constructor(config, session, generation_config) {
-        super(config, session);
-        this.generation_config = generation_config;
-
-        // config doesn't contain pad_token_id, so we assume it is the eos_token_id
-        this.config.pad_token_id = this.config.eos_token_id
-
-        this.num_heads = this.config.num_key_value_heads ?? this.config.num_attention_heads
-        this.num_layers = this.config.num_hidden_layers
-        this.dim_kv = this.config.hidden_size / this.config.num_attention_heads
-    }
-}
-/**
- * The bare Qwen2 Model outputting raw hidden-states without any specific head on top.
- */
-export class Qwen2Model extends Qwen2PreTrainedModel { }
-
-export class Qwen2ForCausalLM extends Qwen2PreTrainedModel { }
-//////////////////////////////////////////////////
-
-
-//////////////////////////////////////////////////
 // Phi models
 
 export class PhiPreTrainedModel extends PreTrainedModel {
@@ -4060,16 +4050,6 @@ export class DPTModel extends DPTPreTrainedModel { }
  */
 export class DPTForDepthEstimation extends DPTPreTrainedModel { }
 //////////////////////////////////////////////////
-
-//////////////////////////////////////////////////
-export class DepthAnythingPreTrainedModel extends PreTrainedModel { }
-
-/**
- * Depth Anything Model with a depth estimation head on top (consisting of 3 convolutional layers) e.g. for KITTI, NYUv2.
- */
-export class DepthAnythingForDepthEstimation extends DepthAnythingPreTrainedModel { }
-//////////////////////////////////////////////////
-
 
 //////////////////////////////////////////////////
 export class GLPNPreTrainedModel extends PreTrainedModel { }
@@ -4550,44 +4530,6 @@ export class Wav2Vec2ForCTC extends Wav2Vec2PreTrainedModel {
 }
 
 export class Wav2Vec2ForSequenceClassification extends Wav2Vec2PreTrainedModel {
-    /**
-     * Calls the model on new inputs.
-     * @param {Object} model_inputs The inputs to the model.
-     * @returns {Promise<SequenceClassifierOutput>} An object containing the model's output logits for sequence classification.
-     */
-    async _call(model_inputs) {
-        return new SequenceClassifierOutput(await super._call(model_inputs));
-    }
-}
-//////////////////////////////////////////////////
-
-//////////////////////////////////////////////////
-// Wav2Vec2 models
-export class Wav2Vec2BertPreTrainedModel extends PreTrainedModel { };
-
-/**
- * The bare Wav2Vec2Bert Model transformer outputting raw hidden-states without any specific head on top.
- */
-export class Wav2Vec2BertModel extends Wav2Vec2BertPreTrainedModel { }
-
-/**
- * Wav2Vec2Bert Model with a `language modeling` head on top for Connectionist Temporal Classification (CTC).
- */
-export class Wav2Vec2BertForCTC extends Wav2Vec2BertPreTrainedModel {
-    /**
-     * @param {Object} model_inputs
-     * @param {Tensor} model_inputs.input_features Float values of input mel-spectrogram.
-     * @param {Tensor} model_inputs.attention_mask Mask to avoid performing convolution and attention on padding token indices. Mask values selected in [0, 1]
-     */
-    async _call(model_inputs) {
-        return new CausalLMOutput(await super._call(model_inputs));
-    }
-}
-
-/**
- * Wav2Vec2Bert Model with a sequence classification head on top (a linear layer over the pooled output).
- */
-export class Wav2Vec2BertForSequenceClassification extends Wav2Vec2BertPreTrainedModel {
     /**
      * Calls the model on new inputs.
      * @param {Object} model_inputs The inputs to the model.
@@ -5171,6 +5113,7 @@ export class PretrainedMixin {
         local_files_only = false,
         revision = 'main',
         model_file_name = null,
+        session_options = {},
     } = {}) {
 
         let options = {
@@ -5181,6 +5124,7 @@ export class PretrainedMixin {
             local_files_only,
             revision,
             model_file_name,
+            session_options,
         }
         config = await AutoConfig.from_pretrained(pretrained_model_name_or_path, options);
         if (!options.config) {
@@ -5232,7 +5176,6 @@ const MODEL_MAPPING_NAMES_ENCODER_ONLY = new Map([
     ['mobilebert', ['MobileBertModel', MobileBertModel]],
     ['squeezebert', ['SqueezeBertModel', SqueezeBertModel]],
     ['wav2vec2', ['Wav2Vec2Model', Wav2Vec2Model]],
-    ['wav2vec2-bert', ['Wav2Vec2BertModel', Wav2Vec2BertModel]],
     ['hubert', ['HubertModel', HubertModel]],
     ['wavlm', ['WavLMModel', WavLMModel]],
     ['audio-spectrogram-transformer', ['ASTModel', ASTModel]],
@@ -5283,7 +5226,6 @@ const MODEL_MAPPING_NAMES_DECODER_ONLY = new Map([
     ['gpt_neox', ['GPTNeoXModel', GPTNeoXModel]],
     ['codegen', ['CodeGenModel', CodeGenModel]],
     ['llama', ['LlamaModel', LlamaModel]],
-    ['qwen2', ['Qwen2Model', Qwen2Model]],
     ['phi', ['PhiModel', PhiModel]],
     ['mpt', ['MptModel', MptModel]],
     ['opt', ['OPTModel', OPTModel]],
@@ -5362,7 +5304,6 @@ const MODEL_WITH_LM_HEAD_MAPPING_NAMES = new Map([
     ['gpt_neox', ['GPTNeoXForCausalLM', GPTNeoXForCausalLM]],
     ['codegen', ['CodeGenForCausalLM', CodeGenForCausalLM]],
     ['llama', ['LlamaForCausalLM', LlamaForCausalLM]],
-    ['qwen2', ['Qwen2ForCausalLM', Qwen2ForCausalLM]],
     ['phi', ['PhiForCausalLM', PhiForCausalLM]],
     ['mpt', ['MptForCausalLM', MptForCausalLM]],
     ['opt', ['OPTForCausalLM', OPTForCausalLM]],
@@ -5455,14 +5396,12 @@ const MODEL_FOR_MASK_GENERATION_MAPPING_NAMES = new Map([
 
 const MODEL_FOR_CTC_MAPPING_NAMES = new Map([
     ['wav2vec2', ['Wav2Vec2ForCTC', Wav2Vec2ForCTC]],
-    ['wav2vec2-bert', ['Wav2Vec2BertForCTC', Wav2Vec2BertForCTC]],
     ['wavlm', ['WavLMForCTC', WavLMForCTC]],
     ['hubert', ['HubertForCTC', HubertForCTC]],
 ]);
 
 const MODEL_FOR_AUDIO_CLASSIFICATION_MAPPING_NAMES = new Map([
     ['wav2vec2', ['Wav2Vec2ForSequenceClassification', Wav2Vec2ForSequenceClassification]],
-    ['wav2vec2-bert', ['Wav2Vec2BertForSequenceClassification', Wav2Vec2BertForSequenceClassification]],
     ['wavlm', ['WavLMForSequenceClassification', WavLMForSequenceClassification]],
     ['hubert', ['HubertForSequenceClassification', HubertForSequenceClassification]],
     ['audio-spectrogram-transformer', ['ASTForAudioClassification', ASTForAudioClassification]],
@@ -5478,7 +5417,6 @@ const MODEL_FOR_IMAGE_TO_IMAGE_MAPPING_NAMES = new Map([
 
 const MODEL_FOR_DEPTH_ESTIMATION_MAPPING_NAMES = new Map([
     ['dpt', ['DPTForDepthEstimation', DPTForDepthEstimation]],
-    ['depth_anything', ['DepthAnythingForDepthEstimation', DepthAnythingForDepthEstimation]],
     ['glpn', ['GLPNForDepthEstimation', GLPNForDepthEstimation]],
 ])
 

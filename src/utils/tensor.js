@@ -17,6 +17,7 @@ import {
 
 const DataTypeMap = Object.freeze({
     float32: Float32Array,
+    float16: Uint16Array,
     float64: Float64Array,
     string: Array, // string[]
     int8: Int8Array,
@@ -39,16 +40,48 @@ const ONNXTensor = ONNX.Tensor;
 
 export class Tensor {
     /** @type {number[]} Dimensions of the tensor. */
-    dims;
+    get dims() {
+        return this.ort_tensor.dims;
+    };
+    set dims(value) {
+        this.ort_tensor.dims = value;
+    }
 
     /** @type {DataType} Type of the tensor. */
-    type;
+    get type() {
+        return this.ort_tensor.type;
+    };
 
     /** @type {DataArray} The data stored in the tensor. */
-    data;
+    get data() {
+        return this.ort_tensor.data;
+    }
 
     /** @type {number} The number of elements in the tensor. */
-    size;
+    get size() {
+        return this.ort_tensor.size;
+    };
+
+    get dataLocation() {
+        return this.ort_tensor.dataLocation;
+    };
+
+    /** @type {DataArray} The data stored in the tensor. */
+    get cpuData() {
+        return this.ort_tensor.cpuData;
+    };
+  
+    get location() {
+        return this.ort_tensor.dataLocation;
+    }
+
+    get gpuBuffer() {
+        return this.ort_tensor.gpuBufferData;
+    }
+
+    async getData(releaseData) {
+        return this.ort_tensor.getData(releaseData);
+    };
 
     /**
      * Create a new Tensor or copy an existing Tensor.
@@ -56,16 +89,15 @@ export class Tensor {
      */
     constructor(...args) {
         if (args[0] instanceof ONNXTensor) {
-            // Create shallow copy
-            Object.assign(this, args[0]);
-
+            this.ort_tensor = args[0];
         } else {
             // Create new tensor
-            Object.assign(this, new ONNXTensor(
+            const t = new ONNXTensor(
                 /** @type {DataType} */(args[0]),
                 /** @type {Exclude<import('./maths.js').AnyTypedArray, Uint8ClampedArray>} */(args[1]),
                 args[2]
-            ));
+            );
+            this.ort_tensor = t;
         }
 
         return new Proxy(this, {
