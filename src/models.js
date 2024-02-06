@@ -212,17 +212,10 @@ async function sessionRun(session, inputs) {
     const checkedInputs = validateInputs(session, inputs);
     try {
         // @ts-ignore
-        // dumpInputs(checkedInputs);
-        /*
-        let feed = {};
-        for (const [name, t] of Object.entries(checkedInputs)) {
-            feed[name] = t.t;
-        }
-        */
         let output = await session.run(checkedInputs);
         for (const [name, t] of Object.entries(checkedInputs)) {
             if (t.location === 'gpu-buffer' && name.startsWith('past')) {
-                t.dispose();
+                t.ort_tensor.dispose();
             };
         }
         output = replaceTensors(output);
