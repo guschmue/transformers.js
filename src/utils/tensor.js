@@ -41,9 +41,12 @@ const ONNXTensor = ONNX.Tensor;
 export class Tensor {
     /** @type {number[]} Dimensions of the tensor. */
     get dims() {
+        // @ts-ignore
         return this.ort_tensor.dims;
-    };
+    }
     set dims(value) {
+        // FIXME: ONNXTensor declares dims as readonly so one needs to use the constructor() if dims change.
+        // @ts-ignore
         this.ort_tensor.dims = value;
     }
 
@@ -62,26 +65,7 @@ export class Tensor {
         return this.ort_tensor.size;
     };
 
-    get dataLocation() {
-        return this.ort_tensor.dataLocation;
-    };
-
-    /** @type {DataArray} The data stored in the tensor. */
-    get cpuData() {
-        return this.ort_tensor.cpuData;
-    };
-  
-    get location() {
-        return this.ort_tensor.dataLocation;
-    }
-
-    get gpuBuffer() {
-        return this.ort_tensor.gpuBufferData;
-    }
-
-    async getData(releaseData) {
-        return this.ort_tensor.getData(releaseData);
-    };
+    ort_tensor;
 
     /**
      * Create a new Tensor or copy an existing Tensor.
@@ -119,6 +103,11 @@ export class Tensor {
                 return obj[key] = value;
             }
         });
+    }
+
+    dispose() {
+        this.ort_tensor.dispose();
+        // this.ort_tensor = undefined;
     }
 
     /**

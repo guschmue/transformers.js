@@ -190,13 +190,6 @@ function validateInputs(session, inputs) {
     return checkedInputs;
 }
 
-function dumpInputs(inputs) {
-    for (const [name, t] of Object.entries(inputs)) {
-        console.log(`${name} [${t.dims}], ${t.type}, ${t.location}, ${t.size}`);
-    }
-    console.log('--');
-}
-
 /**
  * Executes an InferenceSession using the specified inputs.
  * NOTE: `inputs` must contain at least the input names of the model.
@@ -211,14 +204,17 @@ function dumpInputs(inputs) {
 async function sessionRun(session, inputs) {
     const checkedInputs = validateInputs(session, inputs);
     try {
-        // @ts-ignore
-        let output = await session.run(checkedInputs);
+        // pass the ort tensor to ort
+        const ortFeed = Object.fromEntries(Object.entries(checkedInputs).map(([k, v]) => [k, v.ort_tensor]));
+        let output = await session.run(ortFeed);    
+        output = replaceTensors(output);
+
         for (const [name, t] of Object.entries(checkedInputs)) {
-            if (t.location === 'gpu-buffer' && name.startsWith('past')) {
-                t.ort_tensor.dispose();
+            // if we use gpu buffers for kv_caches, we own them and need to dispose()
+            if (name.startsWith('past_key_values')) {
+                t.dispose();
             };
         }
-        output = replaceTensors(output);
         return output;
     } catch (e) {
         // This usually occurs when the inputs are of the wrong type.
